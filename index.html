@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>نظام التحقق الذكي من التكاليف الدراسية</title>
+    <meta
+      name="description"
+      content="منصة أكاديمية ذكية لتعزيز النزاهة الأكاديمية وتبسيط سير العمل في الجامعات."
+    />
+    <meta name="author" content="نظام التحقق الذكي" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="نظام التحقق الذكي من التكاليف الدراسية" />
+    <meta
+      property="og:description"
+      content="منصة أكاديمية ذكية لتعزيز النزاهة الأكاديمية وتبسيط سير العمل في الجامعات."
+    />
+    <meta name="twitter:title" content="نظام التحقق الذكي من التكاليف الدراسية" />
+    <meta
+      name="twitter:description"
+      content="منصة أكاديمية ذكية لتعزيز النزاهة الأكاديمية وتبسيط سير العمل في الجامعات."
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+      }
+
+      html {
+        background: #f7f9fc;
+        color: #2f3747;
+      }
+
+      html.dark {
+        background: #111827;
+        color: #f8fafc;
+      }
+    </style>
+    <script>
+      (function () {
+        var storageKey = "theme";
+        var storedTheme = null;
+
+        try {
+          storedTheme = localStorage.getItem(storageKey);
+        } catch (error) {
+          storedTheme = null;
+        }
+
+        var prefersDark =
+          window.matchMedia &&
+          window.matchMedia("(prefers-color-scheme: dark)").matches;
+        var theme =
+          storedTheme === "dark" || storedTheme === "light"
+            ? storedTheme
+            : prefersDark
+              ? "dark"
+              : "light";
+        var root = document.documentElement;
+
+        root.classList.toggle("dark", theme === "dark");
+        root.style.colorScheme = theme;
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
