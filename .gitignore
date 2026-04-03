@@ -10,11 +10,18 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+.env
 *.local
+.npm-cache/
+.vercel/
+devserver.pid
+devserver-current.log
+devserver-current.err.log
 supabase/.env
 supabase/.env.*
 !supabase/.env.example
 !.env.local.example
+!.env.example
 !supabase/.env.local.example
 
 # Editor directories and files
