@@ -2,6 +2,8 @@ import { supabase } from "@/integrations/supabase/client";
 import type { AuthUser, UserRole } from "@/lib/auth";
 import { isSupabaseConfigured } from "@/lib/supabase-app";
 
+const ADMIN_FUNCTION_TIMEOUT_MS = 15000;
+
 export interface CreateAdminUserInput {
   email: string;
   password: string;
@@ -64,6 +66,45 @@ interface DeleteAdminUserResult {
   error?: string;
 }
 
+async function invokeAdminFunction(
+  functionName: string,
+  payload: unknown,
+  accessToken: string,
+) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ADMIN_FUNCTION_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/${functionName}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    const raw = await response.text();
+    return { response, raw };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function getAdminFunctionErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return "انتهت مهلة الاتصال أثناء التواصل مع الخادم. حاول مرة أخرى.";
+  }
+
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+
+  return fallback;
+}
+
 export async function createSupabaseAdminUser(input: CreateAdminUserInput): Promise<CreateAdminUserResult> {
   if (!isSupabaseConfigured()) {
     return { ok: false, error: "Supabase غير مهيأ." };
@@ -76,30 +117,33 @@ export async function createSupabaseAdminUser(input: CreateAdminUserInput): Prom
     return { ok: false, error: "تعذر التحقق من جلسة الإدارة الحالية." };
   }
 
-  const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/admin-create-user`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify({
-      email: input.email.trim(),
-      password: input.password,
-      role: input.role,
-      full_name: input.fullName.trim(),
-      full_name_ar: input.fullNameAr?.trim() || input.fullName.trim(),
-      full_name_en: input.fullNameEn?.trim() || "",
-      identifier: input.identifier.trim(),
-      department: input.department.trim(),
-      role_title: input.roleTitle.trim(),
-      level: input.level?.trim() || "",
-      semester: input.semester?.trim() || "",
-      force_password_change: input.forcePasswordChange !== false,
-    }),
-  });
-
-  const raw = await response.text();
+  let response: Response;
+  let raw: string;
+  try {
+    ({ response, raw } = await invokeAdminFunction(
+      "admin-create-user",
+      {
+        email: input.email.trim(),
+        password: input.password,
+        role: input.role,
+        full_name: input.fullName.trim(),
+        full_name_ar: input.fullNameAr?.trim() || input.fullName.trim(),
+        full_name_en: input.fullNameEn?.trim() || "",
+        identifier: input.identifier.trim(),
+        department: input.department.trim(),
+        role_title: input.roleTitle.trim(),
+        level: input.level?.trim() || "",
+        semester: input.semester?.trim() || "",
+        force_password_change: input.forcePasswordChange !== false,
+      },
+      accessToken,
+    ));
+  } catch (error) {
+    return {
+      ok: false,
+      error: getAdminFunctionErrorMessage(error, "تعذر إنشاء المستخدم."),
+    };
+  }
 
   if (!response.ok) {
     try {
@@ -140,31 +184,34 @@ export async function updateSupabaseAdminUser(input: UpdateAdminUserInput): Prom
     return { ok: false, error: "تعذر التحقق من جلسة الإدارة الحالية." };
   }
 
-  const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/admin-update-user`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify({
-      user_id: input.userId,
-      email: input.email.trim(),
-      password: input.password?.trim() || undefined,
-      role: input.role,
-      full_name: input.fullName.trim(),
-      full_name_ar: input.fullNameAr?.trim() || input.fullName.trim(),
-      full_name_en: input.fullNameEn?.trim() || "",
-      identifier: input.identifier.trim(),
-      department: input.department.trim(),
-      role_title: input.roleTitle.trim(),
-      level: input.level?.trim() || undefined,
-      semester: input.semester?.trim() || undefined,
-      force_password_change: input.forcePasswordChange === true,
-    }),
-  });
-
-  const raw = await response.text();
+  let response: Response;
+  let raw: string;
+  try {
+    ({ response, raw } = await invokeAdminFunction(
+      "admin-update-user",
+      {
+        user_id: input.userId,
+        email: input.email.trim(),
+        password: input.password?.trim() || undefined,
+        role: input.role,
+        full_name: input.fullName.trim(),
+        full_name_ar: input.fullNameAr?.trim() || input.fullName.trim(),
+        full_name_en: input.fullNameEn?.trim() || "",
+        identifier: input.identifier.trim(),
+        department: input.department.trim(),
+        role_title: input.roleTitle.trim(),
+        level: input.level?.trim() || undefined,
+        semester: input.semester?.trim() || undefined,
+        force_password_change: input.forcePasswordChange === true,
+      },
+      accessToken,
+    ));
+  } catch (error) {
+    return {
+      ok: false,
+      error: getAdminFunctionErrorMessage(error, "تعذر تحديث المستخدم."),
+    };
+  }
 
   if (!response.ok) {
     try {
@@ -204,19 +251,22 @@ export async function deleteSupabaseAdminUser(input: DeleteAdminUserInput): Prom
     return { ok: false, error: "تعذر التحقق من جلسة الإدارة الحالية." };
   }
 
-  const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/admin-delete-user`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify({
-      user_id: input.userId,
-    }),
-  });
-
-  const raw = await response.text();
+  let response: Response;
+  let raw: string;
+  try {
+    ({ response, raw } = await invokeAdminFunction(
+      "admin-delete-user",
+      {
+        user_id: input.userId,
+      },
+      accessToken,
+    ));
+  } catch (error) {
+    return {
+      ok: false,
+      error: getAdminFunctionErrorMessage(error, "تعذر حذف المستخدم."),
+    };
+  }
 
   if (!response.ok) {
     try {
