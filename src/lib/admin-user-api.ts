@@ -2,7 +2,7 @@ import { supabase } from "@/integrations/supabase/client";
 import type { AuthUser, UserRole } from "@/lib/auth";
 import { isSupabaseConfigured } from "@/lib/supabase-app";
 
-const ADMIN_FUNCTION_TIMEOUT_MS = 15000;
+const ADMIN_FUNCTION_TIMEOUT_MS = 15_000;
 
 export interface CreateAdminUserInput {
   email: string;
@@ -66,33 +66,6 @@ interface DeleteAdminUserResult {
   error?: string;
 }
 
-async function invokeAdminFunction(
-  functionName: string,
-  payload: unknown,
-  accessToken: string,
-) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), ADMIN_FUNCTION_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/${functionName}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
-        Authorization: `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-
-    const raw = await response.text();
-    return { response, raw };
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
 function getAdminFunctionErrorMessage(error: unknown, fallback: string) {
   if (error instanceof DOMException && error.name === "AbortError") {
     return "انتهت مهلة الاتصال أثناء التواصل مع الخادم. حاول مرة أخرى.";
@@ -105,70 +78,106 @@ function getAdminFunctionErrorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
+async function parseInvokeError(error: unknown, fallback: string) {
+  if (error && typeof error === "object" && "context" in error) {
+    const context = (error as { context?: { text?: () => Promise<string> } }).context;
+
+    if (context?.text) {
+      try {
+        const raw = await context.text();
+        if (raw.trim()) {
+          const parsed = JSON.parse(raw) as { error?: string; message?: string };
+          if (typeof parsed.error === "string" && parsed.error.trim()) {
+            return parsed.error;
+          }
+          if (typeof parsed.message === "string" && parsed.message.trim()) {
+            return parsed.message;
+          }
+          return raw;
+        }
+      } catch {
+        // Ignore malformed function payloads and fall through to the generic message.
+      }
+    }
+  }
+
+  return getAdminFunctionErrorMessage(error, fallback);
+}
+
+async function invokeAdminFunction<T>(
+  functionName: string,
+  payload: Record<string, unknown>,
+  fallbackError: string,
+) {
+  try {
+    const invokePromise = supabase.functions.invoke<T>(functionName, {
+      body: payload,
+    });
+
+    const result = await Promise.race([
+      invokePromise,
+      new Promise<never>((_, reject) => {
+        window.setTimeout(
+          () => reject(new DOMException("Timed out", "AbortError")),
+          ADMIN_FUNCTION_TIMEOUT_MS,
+        );
+      }),
+    ]);
+
+    if (result.error) {
+      return {
+        ok: false as const,
+        error: await parseInvokeError(result.error, fallbackError),
+      };
+    }
+
+    return {
+      ok: true as const,
+      data: result.data,
+    };
+  } catch (error) {
+    return {
+      ok: false as const,
+      error: await parseInvokeError(error, fallbackError),
+    };
+  }
+}
+
 export async function createSupabaseAdminUser(input: CreateAdminUserInput): Promise<CreateAdminUserResult> {
   if (!isSupabaseConfigured()) {
     return { ok: false, error: "Supabase غير مهيأ." };
   }
 
-  const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
-  const accessToken = sessionData.session?.access_token;
+  const result = await invokeAdminFunction<{ user?: AuthUser }>(
+    "admin-create-user",
+    {
+      email: input.email.trim(),
+      password: input.password,
+      role: input.role,
+      full_name: input.fullName.trim(),
+      full_name_ar: input.fullNameAr?.trim() || input.fullName.trim(),
+      full_name_en: input.fullNameEn?.trim() || "",
+      identifier: input.identifier.trim(),
+      department: input.department.trim(),
+      role_title: input.roleTitle.trim(),
+      level: input.level?.trim() || "",
+      semester: input.semester?.trim() || "",
+      force_password_change: input.forcePasswordChange !== false,
+    },
+    "تعذر إنشاء المستخدم.",
+  );
 
-  if (sessionError || !accessToken) {
-    return { ok: false, error: "تعذر التحقق من جلسة الإدارة الحالية." };
+  if (!result.ok) {
+    return { ok: false, error: result.error };
   }
 
-  let response: Response;
-  let raw: string;
-  try {
-    ({ response, raw } = await invokeAdminFunction(
-      "admin-create-user",
-      {
-        email: input.email.trim(),
-        password: input.password,
-        role: input.role,
-        full_name: input.fullName.trim(),
-        full_name_ar: input.fullNameAr?.trim() || input.fullName.trim(),
-        full_name_en: input.fullNameEn?.trim() || "",
-        identifier: input.identifier.trim(),
-        department: input.department.trim(),
-        role_title: input.roleTitle.trim(),
-        level: input.level?.trim() || "",
-        semester: input.semester?.trim() || "",
-        force_password_change: input.forcePasswordChange !== false,
-      },
-      accessToken,
-    ));
-  } catch (error) {
-    return {
-      ok: false,
-      error: getAdminFunctionErrorMessage(error, "تعذر إنشاء المستخدم."),
-    };
-  }
-
-  if (!response.ok) {
-    try {
-      const parsed = JSON.parse(raw) as { error?: string };
-      return {
-        ok: false,
-        error: parsed.error ?? "تعذر إنشاء المستخدم.",
-      };
-    } catch {
-      return {
-        ok: false,
-        error: raw || "تعذر إنشاء المستخدم.",
-      };
-    }
-  }
-
-  const parsed = raw ? JSON.parse(raw) as { user?: AuthUser } : {};
-
-  if (!parsed.user) {
+  if (!result.data?.user) {
     return { ok: false, error: "تم استلام استجابة غير مكتملة من الخادم." };
   }
 
   return {
     ok: true,
-    user: parsed.user,
+    user: result.data.user,
   };
 }
 
@@ -177,65 +186,37 @@ export async function updateSupabaseAdminUser(input: UpdateAdminUserInput): Prom
     return { ok: false, error: "Supabase غير مهيأ." };
   }
 
-  const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
-  const accessToken = sessionData.session?.access_token;
+  const result = await invokeAdminFunction<{ user?: AuthUser }>(
+    "admin-update-user",
+    {
+      user_id: input.userId,
+      email: input.email.trim(),
+      password: input.password?.trim() || undefined,
+      role: input.role,
+      full_name: input.fullName.trim(),
+      full_name_ar: input.fullNameAr?.trim() || input.fullName.trim(),
+      full_name_en: input.fullNameEn?.trim() || "",
+      identifier: input.identifier.trim(),
+      department: input.department.trim(),
+      role_title: input.roleTitle.trim(),
+      level: input.level?.trim() || undefined,
+      semester: input.semester?.trim() || undefined,
+      force_password_change: input.forcePasswordChange === true,
+    },
+    "تعذر تحديث المستخدم.",
+  );
 
-  if (sessionError || !accessToken) {
-    return { ok: false, error: "تعذر التحقق من جلسة الإدارة الحالية." };
+  if (!result.ok) {
+    return { ok: false, error: result.error };
   }
 
-  let response: Response;
-  let raw: string;
-  try {
-    ({ response, raw } = await invokeAdminFunction(
-      "admin-update-user",
-      {
-        user_id: input.userId,
-        email: input.email.trim(),
-        password: input.password?.trim() || undefined,
-        role: input.role,
-        full_name: input.fullName.trim(),
-        full_name_ar: input.fullNameAr?.trim() || input.fullName.trim(),
-        full_name_en: input.fullNameEn?.trim() || "",
-        identifier: input.identifier.trim(),
-        department: input.department.trim(),
-        role_title: input.roleTitle.trim(),
-        level: input.level?.trim() || undefined,
-        semester: input.semester?.trim() || undefined,
-        force_password_change: input.forcePasswordChange === true,
-      },
-      accessToken,
-    ));
-  } catch (error) {
-    return {
-      ok: false,
-      error: getAdminFunctionErrorMessage(error, "تعذر تحديث المستخدم."),
-    };
-  }
-
-  if (!response.ok) {
-    try {
-      const parsed = JSON.parse(raw) as { error?: string };
-      return {
-        ok: false,
-        error: parsed.error ?? "تعذر تحديث المستخدم.",
-      };
-    } catch {
-      return {
-        ok: false,
-        error: raw || "تعذر تحديث المستخدم.",
-      };
-    }
-  }
-
-  const parsed = raw ? JSON.parse(raw) as { user?: AuthUser } : {};
-  if (!parsed.user) {
+  if (!result.data?.user) {
     return { ok: false, error: "تم استلام استجابة غير مكتملة من الخادم." };
   }
 
   return {
     ok: true,
-    user: parsed.user,
+    user: result.data.user,
   };
 }
 
@@ -244,46 +225,7 @@ export async function deleteSupabaseAdminUser(input: DeleteAdminUserInput): Prom
     return { ok: false, error: "Supabase غير مهيأ." };
   }
 
-  const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
-  const accessToken = sessionData.session?.access_token;
-
-  if (sessionError || !accessToken) {
-    return { ok: false, error: "تعذر التحقق من جلسة الإدارة الحالية." };
-  }
-
-  let response: Response;
-  let raw: string;
-  try {
-    ({ response, raw } = await invokeAdminFunction(
-      "admin-delete-user",
-      {
-        user_id: input.userId,
-      },
-      accessToken,
-    ));
-  } catch (error) {
-    return {
-      ok: false,
-      error: getAdminFunctionErrorMessage(error, "تعذر حذف المستخدم."),
-    };
-  }
-
-  if (!response.ok) {
-    try {
-      const parsed = JSON.parse(raw) as { error?: string };
-      return {
-        ok: false,
-        error: parsed.error ?? "تعذر حذف المستخدم.",
-      };
-    } catch {
-      return {
-        ok: false,
-        error: raw || "تعذر حذف المستخدم.",
-      };
-    }
-  }
-
-  const parsed = raw ? JSON.parse(raw) as {
+  const result = await invokeAdminFunction<{
     deleted_user?: {
       id: string;
       email: string;
@@ -291,24 +233,34 @@ export async function deleteSupabaseAdminUser(input: DeleteAdminUserInput): Prom
       role: UserRole;
     };
     impact_summary?: DeleteAdminUserResult["impactSummary"];
-  } : {};
+  }>(
+    "admin-delete-user",
+    {
+      user_id: input.userId,
+    },
+    "تعذر حذف المستخدم.",
+  );
 
-  if (!parsed.deleted_user) {
+  if (!result.ok) {
+    return { ok: false, error: result.error };
+  }
+
+  if (!result.data?.deleted_user) {
     return { ok: false, error: "تم استلام استجابة غير مكتملة من الخادم." };
   }
 
   return {
     ok: true,
     deletedUser: {
-      id: parsed.deleted_user.id,
-      email: parsed.deleted_user.email,
+      id: result.data.deleted_user.id,
+      email: result.data.deleted_user.email,
       academicId: "",
-      fullName: parsed.deleted_user.full_name,
-      role: parsed.deleted_user.role,
+      fullName: result.data.deleted_user.full_name,
+      role: result.data.deleted_user.role,
       department: "",
       roleTitle: "",
       mustChangePassword: false,
     },
-    impactSummary: parsed.impact_summary,
+    impactSummary: result.data.impact_summary,
   };
 }
